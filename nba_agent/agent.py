@@ -22,6 +22,9 @@ by calling tools, never by guessing. Rules:
 and calibration, not accuracy alone.
 - When asked how to improve the data, call diagnose_data, then test concrete changes with \
 run_experiment before recommending them. Report what actually helped and what did not.
+- To predict a game, make sure the season containing the game date is loaded, and pass game_date \
+so rest days are computed from the schedule. Report each team's rest and whether either is on a \
+back-to-back. If the tool returns a warning, tell the user.
 - When predicting a game, give the probability, how confident the model is, and the main factors. \
 Remind the user that single NBA games are highly uncertain.
 - Be concise. Use numbers from tool results only."""
@@ -75,14 +78,18 @@ TOOLS = [
     },
     {
         "name": "predict_game",
-        "description": "Home-win probability for an upcoming game from each team's current form.",
+        "description": ("Home-win probability for an upcoming game from each team's form before it. "
+                        "Prefer passing game_date: rest days and back-to-backs are then computed from "
+                        "each team's last game in the data. Only pass rest values if the user gives them."),
         "input_schema": {
             "type": "object",
             "properties": {
                 "home_team": {"type": "string", "description": "Team abbreviation, e.g. 'LAL'."},
                 "away_team": {"type": "string"},
-                "home_rest": {"type": "integer", "description": "Days since home team's last game."},
-                "away_rest": {"type": "integer"},
+                "game_date": {"type": "string", "description": "Date of the game, YYYY-MM-DD."},
+                "home_rest": {"type": "integer",
+                              "description": "Optional override: days since home team's last game (1 = back-to-back)."},
+                "away_rest": {"type": "integer", "description": "Optional override, same as home_rest."},
                 "model_name": {"type": "string", "description": "Default: logistic_regression."},
             },
             "required": ["home_team", "away_team"],
@@ -154,17 +161,22 @@ class Toolbox:
                 "note": "Positive improvement = lower log loss = better. Changing min_games changes the test set.",
                 "comparison": compare.round(4).to_dict("index")}
 
-    def predict_game(self, home_team: str, away_team: str, home_rest: int = 2, away_rest: int = 2,
+    def predict_game(self, home_team: str, away_team: str, game_date: str | None = None,
+                     home_rest: int | None = None, away_rest: int | None = None,
                      model_name: str = "logistic_regression") -> dict:
         self._require()
         feats = self._active(self.feats, self.dropped)
+        if game_date is not None:
+            # Train only on games before the date, so past dates can be backtested without leakage.
+            feats = feats[feats["GAME_DATE"] < pd.Timestamp(game_date)]
         fitted = model.fit_final(feats, model_name)
-        x = features.matchup_features(self.games, home_team.upper(), away_team.upper(),
-                                      home_rest, away_rest, self.window)
+        x, rest_info = features.matchup_features(self.games, home_team.upper(), away_team.upper(),
+                                                 home_rest, away_rest, self.window, game_date)
         x = x[features.feature_columns(feats)]
         p = float(fitted.predict_proba(x)[0, 1])
-        return {"home_team": home_team.upper(), "away_team": away_team.upper(), "model": model_name,
-                "home_win_probability": round(p, 3), "inputs": x.round(3).iloc[0].to_dict()}
+        return {"home_team": home_team.upper(), "away_team": away_team.upper(), "game_date": game_date,
+                "model": model_name, "home_win_probability": round(p, 3), "rest": rest_info,
+                "inputs": x.round(3).iloc[0].to_dict()}
 
     def call(self, name: str, args: dict) -> str:
         try:

@@ -76,8 +76,18 @@ def feature_columns(feats: pd.DataFrame) -> list[str]:
 
 
 def matchup_features(games: pd.DataFrame, home_team: str, away_team: str,
-                     home_rest: int = 2, away_rest: int = 2, window: int = 10) -> pd.DataFrame:
-    """Features for an upcoming game, from each team's form after its latest game."""
+                     home_rest: int | None = None, away_rest: int | None = None,
+                     window: int = 10, game_date: str | None = None) -> tuple[pd.DataFrame, dict]:
+    """Features for an upcoming game, from each team's form after its latest game.
+
+    If `game_date` is given, only games before that date are used, and any rest
+    value left as None is computed from the team's last game before that date.
+    Rest is days between games, so 1 means a back-to-back. Returns the feature
+    row and a dict describing where the rest values came from.
+    """
+    if game_date is not None:
+        cutoff = pd.Timestamp(game_date)
+        games = games[games["GAME_DATE"] < cutoff]
     form = _rolling_form(_team_games(games), window, shift=0)
     latest = form[form["SEASON"] == form["SEASON"].max()]
     latest = latest.sort_values("GAME_DATE").groupby("TEAM_ABBREVIATION").tail(1).set_index("TEAM_ABBREVIATION")
@@ -85,7 +95,28 @@ def matchup_features(games: pd.DataFrame, home_team: str, away_team: str,
         if team not in latest.index:
             raise ValueError(f"Unknown team '{team}'. Known: {', '.join(sorted(latest.index))}")
     h, a = latest.loc[home_team], latest.loc[away_team]
+
+    info = {}
+    rests = {}
+    for side, team, given, row_ in (("home", home_team, home_rest, h), ("away", away_team, away_rest, a)):
+        last = row_["GAME_DATE"].date()
+        if given is not None:
+            rests[side] = int(given)
+            info[side] = {"team": team, "rest_days": rests[side], "source": "provided by user",
+                          "last_game_in_data": str(last)}
+        elif game_date is not None:
+            rests[side] = int((cutoff - row_["GAME_DATE"]).days)
+            info[side] = {"team": team, "rest_days": rests[side], "source": "computed from schedule",
+                          "last_game_in_data": str(last)}
+        else:
+            raise ValueError("Give a game_date so rest can be computed, or pass home_rest and away_rest.")
+
     row = {f"DIFF_{c}": h[c] - a[c] for c in [f"R{window}_{s}" for s in ROLL_STATS] + ["SEASON_WIN_PCT"]}
-    row.update(HOME_REST=min(home_rest, 7), AWAY_REST=min(away_rest, 7),
-               HOME_B2B=int(home_rest == 1), AWAY_B2B=int(away_rest == 1))
-    return pd.DataFrame([row])
+    row.update(HOME_REST=min(rests["home"], 7), AWAY_REST=min(rests["away"], 7),
+               HOME_B2B=int(rests["home"] == 1), AWAY_B2B=int(rests["away"] == 1))
+    for side in ("home", "away"):
+        info[side]["back_to_back"] = rests[side] == 1
+    if game_date is not None and max(rests.values()) > 10:
+        info["warning"] = ("A team's last game in the data is more than 10 days before this date. "
+                           "The current season may not be loaded, so form and rest may be stale.")
+    return pd.DataFrame([row]), info

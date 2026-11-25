@@ -1,4 +1,6 @@
 """Run with: python -m pytest tests/"""
+import pandas as pd
+
 from nba_agent import data, features
 from nba_agent.agent import Toolbox
 
@@ -25,6 +27,24 @@ def test_tools_run():
     assert tb.load_data(SEASONS)["games_with_features"] > 500
     exp = tb.run_experiment(window=5)
     assert "comparison" in exp
-    pred = tb.predict_game("T01", "T02")
+    pred = tb.predict_game("T01", "T02", home_rest=2, away_rest=1)
     assert 0 < pred["home_win_probability"] < 1
+    assert pred["rest"]["away"]["back_to_back"]
     assert "error" in tb.call("predict_game", {"home_team": "XXX", "away_team": "T02"})
+    assert "error" in tb.call("predict_game", {"home_team": "T01", "away_team": "T02"})  # no date, no rest
+
+
+def test_rest_computed_from_schedule():
+    """With a game date, rest = days since each team's last game before that date."""
+    games = data.make_synthetic_games(SEASONS, seed=2)
+    team = "T05"
+    dates = sorted(games.loc[games["TEAM_ABBREVIATION"] == team, "GAME_DATE"].unique())
+    last, target = pd.Timestamp(dates[-5]), pd.Timestamp(dates[-5]) + pd.Timedelta(days=1)
+    games = games[~((games["GAME_DATE"] > last) & (games["GAME_DATE"] <= target))]  # nothing in between
+    _, info = features.matchup_features(games, team, "T06", game_date=str(target.date()))
+    assert info["home"]["rest_days"] == 1
+    assert info["home"]["back_to_back"]
+    assert info["home"]["source"] == "computed from schedule"
+    # A user-provided value overrides the schedule.
+    _, info = features.matchup_features(games, team, "T06", home_rest=3, game_date=str(target.date()))
+    assert info["home"]["rest_days"] == 3 and info["home"]["source"] == "provided by user"
