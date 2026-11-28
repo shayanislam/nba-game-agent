@@ -125,6 +125,55 @@ def data_diagnostics(feats: pd.DataFrame, model_name: str = "logistic_regression
     }
 
 
+def _per_game_log_loss(y, p, eps: float = 1e-15) -> np.ndarray:
+    p = np.clip(p, eps, 1 - eps)
+    return -(y * np.log(p) + (1 - y) * np.log(1 - p))
+
+
+def paired_cv_compare(current: pd.DataFrame, trial: pd.DataFrame, n_splits: int = 5,
+                      n_boot: int = 2000, seed: int = 0) -> pd.DataFrame:
+    """Compare two feature setups on the *same* games and the *same* time-series folds.
+
+    Both setups are restricted to the games they share, sorted by date, and split
+    with one TimeSeriesSplit, so every difference comes from the features, not from
+    a different test set. For each model it reports:
+      - mean log loss of each setup over the out-of-fold games,
+      - improvement (current minus trial; positive means the trial is better),
+      - how many folds the trial won,
+      - a 95% bootstrap confidence interval for the per-game improvement,
+      - a verdict: 'trial better', 'trial worse', or 'no clear difference'.
+    """
+    common = current["GAME_ID"][current["GAME_ID"].isin(trial["GAME_ID"])]
+    a = current.set_index("GAME_ID").loc[common].sort_values("GAME_DATE")
+    b = trial.set_index("GAME_ID").loc[a.index]
+    y = a["HOME_WIN"].values
+    Xa, Xb = a[feature_columns(a)].values, b[feature_columns(b)].values
+    splits = list(TimeSeriesSplit(n_splits=n_splits).split(Xa))
+    rng = np.random.default_rng(seed)
+
+    rows = []
+    for name in make_models():
+        loss_a, loss_b, fold_wins = [], [], 0
+        for tr, te in splits:
+            ma, mb = make_models()[name], make_models()[name]
+            ma.fit(Xa[tr], y[tr]); mb.fit(Xb[tr], y[tr])
+            la = _per_game_log_loss(y[te], ma.predict_proba(Xa[te])[:, 1])
+            lb = _per_game_log_loss(y[te], mb.predict_proba(Xb[te])[:, 1])
+            loss_a.append(la); loss_b.append(lb)
+            fold_wins += int(lb.mean() < la.mean())
+        diff = np.concatenate(loss_a) - np.concatenate(loss_b)  # positive = trial better
+        diff[np.abs(diff) < 1e-9] = 0.0  # ignore floating-point noise between identical predictions
+        boot = rng.choice(diff, size=(n_boot, len(diff)), replace=True).mean(axis=1)
+        lo, hi = np.percentile(boot, [2.5, 97.5])
+        verdict = "trial better" if lo > 0 else "trial worse" if hi < 0 else "no clear difference"
+        rows.append({"model": name,
+                     "current_log_loss": np.concatenate(loss_a).mean(),
+                     "trial_log_loss": np.concatenate(loss_b).mean(),
+                     "improvement": diff.mean(), "ci95_low": lo, "ci95_high": hi,
+                     "folds_trial_won": f"{fold_wins}/{n_splits}", "verdict": verdict})
+    return pd.DataFrame(rows).set_index("model")
+
+
 def fit_final(feats: pd.DataFrame, model_name: str):
     model = make_models()[model_name]
     model.fit(feats[feature_columns(feats)], feats["HOME_WIN"])

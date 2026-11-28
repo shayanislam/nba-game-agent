@@ -34,6 +34,19 @@ def test_tools_run():
     assert "error" in tb.call("predict_game", {"home_team": "T01", "away_team": "T02"})  # no date, no rest
 
 
+def test_paired_compare():
+    """Identical setups must tie; removing every useful feature must lose clearly."""
+    from nba_agent import model
+    feats = features.build_game_features(data.make_synthetic_games(SEASONS, seed=3))
+    same = model.paired_cv_compare(feats, feats.copy())
+    assert (same["improvement"].abs() < 1e-9).all()
+    assert (same.drop(index="baseline_home_rate")["verdict"] == "no clear difference").all()
+    keep = ["GAME_ID", "GAME_DATE", "SEASON", "HOME_WIN", "HOME_REST", "AWAY_REST"]
+    gutted = feats[keep]
+    worse = model.paired_cv_compare(feats, gutted)
+    assert worse.loc["logistic_regression", "verdict"] == "trial worse"
+
+
 def test_rest_computed_from_schedule():
     """With a game date, rest = days since each team's last game before that date."""
     games = data.make_synthetic_games(SEASONS, seed=2)

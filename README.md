@@ -77,6 +77,13 @@ features, but is not measurably better. Choosing a winner on the same data used 
 it can overstate an improvement, so every apparent gain should be confirmed with
 cross-validation.
 
+Based on that finding, `run_experiment` now uses **paired time-series
+cross-validation**: the current and trial setups are scored on the same games and the
+same folds, so any difference comes from the features alone. For each model it reports
+the log loss change, how many folds the trial won, and a 95% bootstrap confidence
+interval over per-game differences. The agent only calls a change an improvement when
+that interval excludes zero.
+
 ## Setup
 
 ```bash

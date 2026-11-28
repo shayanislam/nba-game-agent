@@ -21,7 +21,9 @@ by calling tools, never by guessing. Rules:
 - Always compare models against the baseline_home_rate model, and judge them mainly by log loss \
 and calibration, not accuracy alone.
 - When asked how to improve the data, call diagnose_data, then test concrete changes with \
-run_experiment before recommending them. Report what actually helped and what did not.
+run_experiment before recommending them. Only call a change an improvement when its verdict is \
+'trial better' (the 95% confidence interval excludes zero). Treat 'no clear difference' as noise, \
+and say so. Report what actually helped and what did not.
 - To predict a game, make sure the season containing the game date is loaded, and pass game_date \
 so rest days are computed from the schedule. Report each team's rest and whether either is on a \
 back-to-back. If the tool returns a warning, tell the user.
@@ -64,8 +66,10 @@ TOOLS = [
     },
     {
         "name": "run_experiment",
-        "description": ("Rebuild features with different settings and compare holdout-season log loss "
-                        "against the current setup. Use to test data improvements."),
+        "description": ("Rebuild features with different settings and compare them with the current setup "
+                        "using paired time-series cross-validation (same games, same folds). Returns each "
+                        "model's log loss change, folds won, a 95% confidence interval and a verdict. "
+                        "Use to test data improvements."),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -149,16 +153,17 @@ class Toolbox:
                        drop_features: list[str] | None = None) -> dict:
         self._require()
         window, min_games = window or self.window, min_games or self.min_games
-        dropped = drop_features or []
-        current, _ = model.holdout_season(self._active(self.feats, self.dropped))
-        trial_feats = features.build_game_features(self.games, window, min_games)
         # Rolling columns are named by window, so map dropped names onto the new window.
-        dropped = [re.sub(r"R\d+_", f"R{window}_", c) for c in dropped]
-        trial, _ = model.holdout_season(self._active(trial_feats, dropped))
-        compare = pd.DataFrame({"current_log_loss": current["log_loss"], "trial_log_loss": trial["log_loss"]})
-        compare["improvement"] = compare["current_log_loss"] - compare["trial_log_loss"]
-        return {"trial_settings": {"window": window, "min_games": min_games, "dropped": dropped},
-                "note": "Positive improvement = lower log loss = better. Changing min_games changes the test set.",
+        dropped = [re.sub(r"R\d+_", f"R{window}_", c) for c in (drop_features or [])]
+        trial_feats = features.build_game_features(self.games, window, min_games)
+        compare = model.paired_cv_compare(self._active(self.feats, self.dropped),
+                                          self._active(trial_feats, dropped))
+        return {"current_settings": {"window": self.window, "min_games": self.min_games, "dropped": self.dropped},
+                "trial_settings": {"window": window, "min_games": min_games, "dropped": dropped},
+                "method": ("Paired time-series cross-validation: both setups are scored on the same games "
+                           "and folds. improvement = current minus trial log loss (positive = trial better). "
+                           "The 95% CI is a bootstrap over per-game differences. 'no clear difference' "
+                           "means the CI includes zero."),
                 "comparison": compare.round(4).to_dict("index")}
 
     def predict_game(self, home_team: str, away_team: str, game_date: str | None = None,
